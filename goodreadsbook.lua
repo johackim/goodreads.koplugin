@@ -119,6 +119,9 @@ function GoodreadsBook:genBookCard(top_height)
     local facts = {}
     local average = tonumber(self.dates.rating)
     if average then table.insert(facts, self.dates.rating) end
+    if self.dates.ratings then
+        table.insert(facts, T(_("%1 ratings"), self.dates.ratings))
+    end
     if self.dates.pages then table.insert(facts, T(_("%1 pages"), self.dates.pages)) end
     if self.dates.release then table.insert(facts, self.dates.release) end
     if self.dates.series then table.insert(facts, self.dates.series) end

@@ -15,6 +15,7 @@ local dump = require("dump")
 local http = require("socket.http")
 local lfs = require("libs/libkoreader-lfs")
 local ltn12 = require("ltn12")
+local rapidjson = require("rapidjson")
 local socket = require("socket")
 local socketutil = require("socketutil")
 local util = require("util")
@@ -23,6 +24,7 @@ local BOOKS_PER_FEED_PAGE = 100  -- what Goodreads gives us per page
 local MAX_FEED_PAGES = 200       -- a stop, should the feed never run short
 local MAX_DESCRIPTION = 1200     -- descriptions are most of the file's weight
 local COVER_WIDTH = 318          -- the widest Goodreads serves, and only ~20kB
+local BOOKS_PER_RATINGS_CALL = 100  -- 200 in one call is refused by their firewall
 
 -- Our own files sit next to this one. A plugin installed by hand is not
 -- under the KOReader folder, so a fixed path would not find them.
@@ -215,31 +217,84 @@ function Shelf.fetchBooks(user_id, key, shelf, report)
     return books, whole_shelf
 end
 
---- Gives each book its place in the shelf ordered by number of ratings.
---
--- The feed never says how many ratings a book has, but Goodreads will sort a
--- shelf by that count. So we read the shelf a second time in that order and
--- keep only each book's position, which is all sorting needs -- and it then
--- works with no connection.
---
--- Returns whether the whole ranking was read; the books are left untouched
--- unless it was, so a ranking cut short cannot order half the library.
-function Shelf.rankByRatings(user_id, key, shelf, books, report)
-    local place_of_book, books_seen = {}, 0
-    local whole_shelf = walkShelf(user_id, key, shelf, "num_ratings",
-        function(page) return report(page, books_seen) end,
-        function(feed_xml)
-            local ids_on_page = 0
-            for id in feed_xml:gmatch("<book_id>(%d+)</book_id>") do
-                ids_on_page = ids_on_page + 1
-                books_seen = books_seen + 1
-                place_of_book[id] = books_seen
-            end
-            return ids_on_page
-        end)
-    if not whole_shelf then return false end
-    for _unused, book in ipairs(books) do
-        book.popularity = place_of_book[book.id]
+-- Goodreads' own web app reads book statistics from this GraphQL endpoint,
+-- using a key it ships publicly; BiblioReads relies on the same one. The RSS
+-- feed carries no ratings count at all, and this is the only place that gives
+-- one. It is undocumented, so it may stop working without notice: a failure
+-- here leaves the books untouched and only costs the "most rated" order.
+local RATINGS_URL =
+    "https://kxbwmqov6jgg3daaamb744ycu4.appsync-api.us-east-1.amazonaws.com/graphql"
+local RATINGS_KEY = "da2-d2fyuybwsbf3poyquvbp2mbiwu"
+
+--- Asks for the ratings counts of one batch of books.
+-- Returns a list lining up with `books`, or nothing if the call failed.
+local function requestRatings(books)
+    local asks = {}
+    for index, book in ipairs(books) do
+        -- One aliased query per book, so a single call answers for all of them.
+        asks[index] = string.format(
+            "b%d:getBookByLegacyId(legacyId:%s){work{stats{ratingsCount}}}", index, book.id)
+    end
+    local body = rapidjson.encode({ query = "query{" .. table.concat(asks, " ") .. "}" })
+
+    local sink = {}
+    socketutil:set_timeout()
+    local code = socket.skip(1, http.request{
+        url = RATINGS_URL,
+        method = "POST",
+        headers = {
+            ["Content-Type"] = "application/json",
+            ["Content-Length"] = tostring(#body),
+            ["X-Api-Key"] = RATINGS_KEY,
+        },
+        source = ltn12.source.string(body),
+        sink = ltn12.sink.table(sink),
+    })
+    socketutil:reset_timeout()
+    if code ~= 200 then return nil end
+
+    local decoded, answer = pcall(rapidjson.decode, table.concat(sink))
+    if not decoded or type(answer) ~= "table" or type(answer.data) ~= "table" then
+        return nil
+    end
+    local counts, found_any = {}, false
+    for index = 1, #books do
+        -- A book Goodreads no longer knows about answers with null.
+        local found = answer.data["b" .. index]
+        if type(found) == "table" and type(found.work) == "table"
+                and type(found.work.stats) == "table" then
+            counts[index] = found.work.stats.ratingsCount
+            found_any = true
+        end
+    end
+    -- A whole batch without a single count means the answer is not what we
+    -- expect any more. Better to stop than to quietly order the library on
+    -- nothing at all.
+    if not found_any then return nil end
+    return counts
+end
+
+--- Fills in how many ratings each book has.
+-- Returns whether the whole library came back; the books are left as they were
+-- if not, so a half-answered run cannot order the library on partial figures.
+function Shelf.fetchRatings(books, report)
+    local counted = {}
+    local done = 0
+    while done < #books do
+        if report(done, #books) == false then return false end
+        local batch = {}
+        for index = done + 1, math.min(done + BOOKS_PER_RATINGS_CALL, #books) do
+            table.insert(batch, books[index])
+        end
+        local counts = requestRatings(batch)
+        if not counts then return false end
+        for index = 1, #batch do
+            counted[done + index] = counts[index]
+        end
+        done = done + #batch
+    end
+    for index, book in ipairs(books) do
+        book.ratings = counted[index]
     end
     return true
 end
@@ -322,10 +377,8 @@ local COMPARE_FOR = {
     title  = function(a, b) return (a.title or "") < (b.title or "") end,
     author = function(a, b) return (a.author or "") < (b.author or "") end,
     rating = function(a, b) return (tonumber(a.rating) or 0) > (tonumber(b.rating) or 0) end,
-    -- Place 1 is the most rated book; a book we have no place for goes last.
-    popularity = function(a, b)
-        return (a.popularity or math.huge) < (b.popularity or math.huge)
-    end,
+    -- Most rated first; a book we have no count for goes last.
+    ratings = function(a, b) return (a.ratings or 0) > (b.ratings or 0) end,
 }
 
 --- The books in the given order, as a new list.

@@ -31,8 +31,15 @@ local SORT_ORDERS = {
     { id = "title",  text = _("Title") },
     { id = "author", text = _("Author") },
     { id = "rating", text = _("Average rating") },
-    { id = "popularity", text = _("Most rated") },
+    { id = "ratings", text = _("Most rated") },
 }
+
+--- 5756911 reads better as 5,756,911. Both the list and the card show the
+-- count, so it is put in shape once, here, where their data is prepared.
+local function grouped(number)
+    local digits = tostring(number)
+    return (digits:reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", ""))
+end
 
 --- The order with this name, falling back to the first: a name saved by an
 -- older version must never leave the menu without a label.
@@ -83,6 +90,7 @@ local function detailsOf(book)
         pages       = book.pages,
         release     = book.year,
         cover       = Shelf.coverFile(book),
+        ratings     = book.ratings and grouped(book.ratings),
         -- The detail page renders this as HTML, so keep the paragraphs.
         description = (book.description or _("No description.")):gsub("\n", "<br/>"),
     }
@@ -95,9 +103,13 @@ function Goodreads:showBooks(title, books)
     end
     local rows = {}
     for _unused, book in ipairs(Shelf.sorted(books, self.sort_order)) do
+        local under = book.author or _("Unknown author")
+        if book.ratings then
+            under = under .. " · " .. T(_("%1 ratings"), grouped(book.ratings))
+        end
         -- Second field is the line shown large, first is the smaller one below.
         table.insert(rows, {
-            book.author or _("Unknown author"),
+            under,
             book.title,
             book = book,
             callback = function()
@@ -198,13 +210,11 @@ function Goodreads:sync()
             })
             return
         end
-        -- Reading the shelf a second time, ordered by ratings count, is what
-        -- makes "Most rated" possible: the feed carries no such number, only
-        -- Goodreads' own ordering.
-        local ranked = Shelf.rankByRatings(user_id, key, shelf, books, function(page, seen)
+        -- How many ratings each book has, which the feed never says. This is
+        -- what "Most rated" sorts on, and what the card shows.
+        local ranked = Shelf.fetchRatings(books, function(done, total)
             return Trapper:info(T(
-                _("Ranking by number of ratings…\n\nPage %1, %2 books so far\n\nTap to stop."),
-                page, seen))
+                _("Counting ratings…\n\n%1 of %2\n\nTap to stop."), done, total))
         end)
         Shelf.save(books)
         self.books = books
