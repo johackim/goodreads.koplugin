@@ -230,7 +230,7 @@ function Goodreads:editFeedUrl()
         description = _([[
 On Goodreads, open My Books and copy the RSS link at the bottom of the page.
 
-It is a private key to your shelves: keep it to yourself.]]),
+A public profile needs nothing more than its number, so you may drop the "key" part of the address. Keep it only if your profile is private -- it is then a private key to your shelves.]]),
         buttons = {{
             {
                 text = _("Cancel"),

@@ -57,12 +57,15 @@ end
 
 -- Reading the feed ----------------------------------------------------------
 
---- Splits the feed address copied from Goodreads into its three parts.
+--- Splits the feed address copied from Goodreads into its parts.
+-- Only the user number is required. A public profile serves its feed to
+-- anyone, so the key is optional; a private one needs the key that Goodreads
+-- puts in the address it gives you.
 -- Returns nothing when the address is not a Goodreads feed.
 function Shelf.parseFeedUrl(feed_url)
-    local user_id, key = feed_url:match("/review/list_rss/(%d+).-[?&]key=([^&]+)")
+    local user_id = feed_url:match("/review/list_rss/(%d+)")
     if not user_id then return nil end
-    return user_id, key, feed_url:match("[?&]shelf=([^&]+)")
+    return user_id, feed_url:match("[?&]key=([^&]+)"), feed_url:match("[?&]shelf=([^&]+)")
 end
 
 -- `sort` is a Goodreads ordering name, or nil for its default, which lists the
@@ -71,8 +74,9 @@ end
 -- we want the default order we say nothing at all.
 local function feedPageUrl(user_id, key, shelf, sort, page)
     return string.format(
-        "https://www.goodreads.com/review/list_rss/%s?key=%s&shelf=%s&page=%d%s",
-        user_id, key, shelf or "%23ALL%23", page,
+        "https://www.goodreads.com/review/list_rss/%s?shelf=%s&page=%d%s%s",
+        user_id, shelf or "%23ALL%23", page,
+        key and ("&key=" .. key) or "",
         sort and ("&sort=" .. sort) or "")
 end
 
