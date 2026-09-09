@@ -2,21 +2,19 @@ local BD = require("ui/bidi")
 local Blitbuffer = require("ffi/blitbuffer")
 local BottomContainer = require("ui/widget/container/bottomcontainer")
 local Button = require("ui/widget/button")
-local CloseButton = require("ui/widget/closebutton")
-local DataStorage = require("datastorage")
+local CloseButton = require("closebutton")
 local Device = require("device")
 local Font = require("ui/font")
 local FrameContainer = require("ui/widget/container/framecontainer")
 local Geom = require("ui/geometry")
 local GestureRange = require("ui/gesturerange")
-local GoodreadsApi = require("goodreadsapi")
+local Shelf = require("goodreadsshelf")
+local ImageWidget = require("ui/widget/imagewidget")
 local HorizontalGroup = require("ui/widget/horizontalgroup")
 local HorizontalSpan = require("ui/widget/horizontalspan")
-local InfoMessage = require("ui/widget/infomessage")
 local InputContainer = require("ui/widget/container/inputcontainer")
 local LeftContainer = require("ui/widget/container/topcontainer")
 local LineWidget = require("ui/widget/linewidget")
-local LuaSettings = require("luasettings")
 local OverlapGroup = require("ui/widget/overlapgroup")
 local Size = require("ui/size")
 local TextWidget = require("ui/widget/textwidget")
@@ -28,7 +26,7 @@ local Input = Device.input
 local Screen = Device.screen
 local T = require("ffi/util").template
 
-local DoubleKeyValueTitle = VerticalGroup:new{
+local DoubleKeyValueTitle = VerticalGroup:extend{
     kv_page = nil,
     title = "",
     tface = Font:getFace("tfont"),
@@ -37,7 +35,8 @@ local DoubleKeyValueTitle = VerticalGroup:new{
 }
 
 function DoubleKeyValueTitle:init()
-    self.close_button = CloseButton:new{ window = self }
+    -- The button closes the page, not just this title bar.
+    self.close_button = CloseButton(self.kv_page)
     local btn_width = self.close_button:getSize().w
     -- title and close button
     table.insert(self, OverlapGroup:new{
@@ -89,14 +88,10 @@ function DoubleKeyValueTitle:setPageCount(curr, total)
     self.title_bottom[2] = self.page_cnt
 end
 
-function DoubleKeyValueTitle:onClose()
-    self.kv_page:onClose()
-    return true
-end
-
-local DoubleKeyValueItem = InputContainer:new{
+local DoubleKeyValueItem = InputContainer:extend{
     key = nil,
     value = nil,
+    cover = nil, -- image file to show on the left of the row
     cface_up = Font:getFace("smallinfofont"),
     cface_down = Font:getFace("xx_smallinfofont"),
     width = nil,
@@ -115,45 +110,54 @@ function DoubleKeyValueItem:init()
         }
     end
     local padding = Screen:scaleBySize(20)
-    local max_width = self.width - 2*padding
+    -- The cover keeps a book's 2:3 shape; the text gets what is left.
+    local cover_width = math.floor(self.height * 2 / 3)
+    local gap = Screen:scaleBySize(10)
+    local max_width = self.width - 2*padding - cover_width - gap
     local h = self.dimen.h / 2
-    local w = self.dimen.w
+    local w = self.dimen.w - cover_width - gap
+    local texts = VerticalGroup:new{
+        LeftContainer:new{
+            padding = 0,
+            dimen = Geom:new{ h = h, w = w },
+            TextWidget:new{
+                text = self.value,
+                max_width = max_width,
+                face = self.cface_up,
+            }
+        },
+        LeftContainer:new{
+            padding = 0,
+            dimen = Geom:new{ h = h, w = w },
+            TextWidget:new{
+                text = self.key,
+                max_width = max_width,
+                face = self.cface_down,
+            }
+        }
+    }
     self[1] = FrameContainer:new{
         padding = padding,
         bordersize = 0,
         width = self.width,
         height = self.height,
-        VerticalGroup:new{
-            LeftContainer:new{
-                padding = 0,
-                dimen = Geom:new{ h = h, w = w },
-                TextWidget:new{
-                    text = self.value,
-                    max_width = max_width,
-                    face = self.cface_up,
-                }
+        HorizontalGroup:new{
+            align = "center",
+            ImageWidget:new{
+                file = self.cover,
+                width = cover_width,
+                height = self.height,
             },
-            LeftContainer:new{
-                padding = 0,
-                dimen = Geom:new{ h = h, w = w },
-                TextWidget:new{
-                    text = self.key,
-                    max_width = max_width,
-                    face = self.cface_down,
-                }
-            }
-        }
+            HorizontalSpan:new{ width = gap },
+            texts,
+        },
     }
 end
 
 function DoubleKeyValueItem:onTap()
     if self.callback then
-        local info = InfoMessage:new{text = _("Please wait…")}
-        UIManager:show(info)
         if G_reader_settings:isFalse("flash_ui") then
-            UIManager:forceRePaint()
             self.callback()
-            UIManager:close(info)
         else
             self[1].invert = true
             UIManager:widgetRepaint(self[1], self[1].dimen.x, self[1].dimen.y)
@@ -162,7 +166,6 @@ function DoubleKeyValueItem:onTap()
             end)
             UIManager:tickAfterNext(function()
                 self.callback()
-                UIManager:close(info)
                 self[1].invert = false
                 UIManager:widgetRepaint(self[1], self[1].dimen.x, self[1].dimen.y)
                 UIManager:setDirty(nil, function()
@@ -174,49 +177,25 @@ function DoubleKeyValueItem:onTap()
     return true
 end
 
-local DoubleKeyValuePage = InputContainer:new{
+local DoubleKeyValuePage = InputContainer:extend{
     title = "",
     width = nil,
     height = nil,
     show_page = 1,
     use_top_page_count = false,
-    text_input = "",
     pages = 1,
-    goodreads_key = "",
+    kv_pairs = nil, -- {{ author, title, book = <record> }, ...}
 }
-
-function DoubleKeyValuePage:readGRSettings()
-    self.gr_settings = LuaSettings:open(DataStorage:getSettingsDir().."/goodreadssettings.lua")
-    return self.gr_settings
-end
-
-function DoubleKeyValuePage:saveGRSettings(setting)
-    if not self.gr_settings then self:readGRSettings() end
-    self.gr_settings:saveSetting("goodreads", setting)
-    self.gr_settings:flush()
-end
 
 function DoubleKeyValuePage:init()
     self.screen_width = Screen:getSize().w
     self.screen_height = Screen:getSize().h
-    local gr_sett = self:readGRSettings().data
-    if gr_sett.goodreads then
-        self.goodreads_key = gr_sett.goodreads.key
-        self.goodreads_secret = gr_sett.goodreads.secret
-    end
-    self.kv_pairs = GoodreadsApi:showData(self.text_input, self.search_type, 1, self.goodreads_key)
-    self.total_res = GoodreadsApi:getTotalResults()
-    if self.total_res == nil then
-        self.total_res = 0
-    end
-    self.total_res = tonumber(self.total_res)
-    if self.kv_pairs == nil then
-        self.kv_pairs = {}
-    end
     self.dimen = Geom:new{
         w = self.width or self.screen_width,
         h = self.height or self.screen_height,
     }
+    -- We hide whatever is below us, so UIManager must repaint it when we go.
+    self.covers_fullscreen = true
     if Device:hasKeys() then
         self.key_events = {
             Close = { {"Back"}, doc = "close page" },
@@ -277,7 +256,7 @@ function DoubleKeyValuePage:init()
 
     local padding = Screen:scaleBySize(10)
     self.item_width = self.dimen.w - 2 * padding
-    self.item_height = Screen:scaleBySize(55)
+    self.item_height = Screen:scaleBySize(80)
     -- setup title bar
     self.title_bar = DoubleKeyValueTitle:new{
         title = self.title,
@@ -290,9 +269,8 @@ function DoubleKeyValuePage:init()
     self.item_margin = self.item_height / 6
     local line_height = self.item_height + 2 * self.item_margin
     local content_height = self.dimen.h - self.title_bar:getSize().h - self.page_info:getSize().h
-    self.max_loaded_pages = 1
     self.items_per_page = math.floor(content_height / line_height)
-    self.pages = math.ceil(self.total_res / self.items_per_page)
+    self.pages = math.ceil(#self.kv_pairs / self.items_per_page)
     self.main_content = VerticalGroup:new{}
     self:_populateItems()
 
@@ -317,20 +295,7 @@ end
 
 function DoubleKeyValuePage:nextPage()
     local new_page = math.min(self.show_page + 1, self.pages)
-    if (new_page * self.items_per_page > #self.kv_pairs) and (self.max_loaded_pages < new_page)
-        and #self.kv_pairs < self.total_res then
-        local api_page = math.floor(new_page * self.items_per_page / 20 ) + 1
-        -- load new portion of data
-        local new_pair = GoodreadsApi:showData(self.text_input, self.search_type, api_page, self.goodreads_key )
-        if new_pair == nil then return end
-        for _, v in pairs(new_pair) do
-            table.insert(self.kv_pairs, v)
-        end
-    end
     if new_page > self.show_page then
-        if self.max_loaded_pages == self.show_page then
-            self.max_loaded_pages = self.max_loaded_pages + 1
-        end
         self.show_page = new_page
         self:_populateItems()
     end
@@ -362,6 +327,7 @@ function DoubleKeyValuePage:_populateItems()
                     width = self.item_width,
                     key = entry[1],
                     value = entry[2],
+                    cover = Shelf.coverFile(entry.book),
                     align = "left",
                     callback = entry.callback,
                     show_parent = self,
@@ -394,22 +360,8 @@ function DoubleKeyValuePage:_populateItems()
     end)
 end
 
-function DoubleKeyValuePage:_nextPage()
-    local new_page = math.min(self.show_page + 1, self.pages)
-    if (new_page * self.items_per_page > #self.kv_pairs) and (self.max_loaded_pages < new_page)
-        and #self.kv_pairs < self.total_res  then
-        local info = InfoMessage:new{text = _("Please wait…")}
-        UIManager:show(info)
-        UIManager:forceRePaint()
-        self:nextPage()
-        UIManager:close(info)
-    else
-        self:nextPage()
-    end
-end
-
 function DoubleKeyValuePage:onNextPage()
-    self:_nextPage()
+    self:nextPage()
     return true
 end
 
@@ -421,7 +373,7 @@ end
 function DoubleKeyValuePage:onSwipe(arg, ges_ev)
     local direction = BD.flipDirectionIfMirroredUILayout(ges_ev.direction)
     if direction == "west" then
-        self:_nextPage()
+        self:nextPage()
         return true
     elseif direction == "east" then
         self:prevPage()

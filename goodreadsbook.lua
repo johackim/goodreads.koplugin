@@ -1,6 +1,6 @@
 local Blitbuffer = require("ffi/blitbuffer")
 local CenterContainer = require("ui/widget/container/centercontainer")
-local CloseButton = require("ui/widget/closebutton")
+local CloseButton = require("closebutton")
 local FrameContainer = require("ui/widget/container/framecontainer")
 local Geom = require("ui/geometry")
 local Font = require("ui/font")
@@ -11,7 +11,6 @@ local InputContainer = require("ui/widget/container/inputcontainer")
 local LeftContainer = require("ui/widget/container/leftcontainer")
 local LineWidget = require("ui/widget/linewidget")
 local OverlapGroup = require("ui/widget/overlapgroup")
-local RenderImage = require("ui/renderimage")
 local ScrollHtmlWidget = require("ui/widget/scrollhtmlwidget")
 local Size = require("ui/size")
 local TextBoxWidget = require("ui/widget/textboxwidget")
@@ -19,12 +18,11 @@ local TextWidget = require("ui/widget/textwidget")
 local UIManager = require("ui/uimanager")
 local VerticalGroup = require("ui/widget/verticalgroup")
 local VerticalSpan = require("ui/widget/verticalspan")
-local https = require("ssl.https")
 local _ = require("gettext")
 local Screen = require("device").screen
 local T = require("ffi/util").template
 
-local GoodreadsBook = InputContainer:new{
+local GoodreadsBook = InputContainer:extend{
     padding = Size.padding.fullscreen,
 }
 
@@ -34,6 +32,8 @@ function GoodreadsBook:init()
     self.large_font_face = Font:getFace("largeffont")
     self.screen_width = Screen:getWidth()
     self.screen_height = Screen:getHeight()
+    -- We hide whatever is below us, so UIManager must repaint it when we go.
+    self.covers_fullscreen = true
     UIManager:setDirty(self, function()
         return "ui", self.dimen
     end)
@@ -52,7 +52,7 @@ function GoodreadsBook:getStatusContent(width)
         align = "left",
         OverlapGroup:new{
             dimen = Geom:new{ w = width, h = Size.item.height_default },
-            CloseButton:new{ window = self },
+            CloseButton(self),
         },
         self:genHeader(_("Book info")),
         self:genBookInfoGroup(),
@@ -193,20 +193,11 @@ function GoodreadsBook:genBookInfoGroup()
         HorizontalSpan:new{ width =  split_span_width }
     }
     -- thumbnail
-    local body = https.request(self.dates.image)
-    local bb_image
-    if body then bb_image = RenderImage:renderImageData(body, #body, false, img_width, img_height) end
-    if bb_image then
-        table.insert(book_info_group, ImageWidget:new{
-            image = bb_image,
-        })
-    else
-        table.insert(book_info_group, ImageWidget:new{
-            file = "plugins/goodreads.koplugin/goodreadsnophoto.png",
-            width = img_width,
-            height = img_height,
-        })
-    end
+    table.insert(book_info_group, ImageWidget:new{
+        file = self.dates.cover,
+        width = img_width,
+        height = img_height,
+    })
 
     local book_info_group_span = HorizontalGroup:new{
         align = "top",
