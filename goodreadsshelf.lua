@@ -134,17 +134,20 @@ function Shelf.parsePage(feed_xml)
     return books
 end
 
---- The cover URL to store for a book.
--- Goodreads sizes covers in two ways, and both turn up: a "._SY475_.jpg"
--- ending that accepts any width, or an "l"/"m" marker in the folder with no
--- ending at all. The second offers no middle size and its "l" is ten times
--- heavier, so those settle for "m".
+-- Some cover addresses end with size markers -- "._SX318_.jpg", sometimes
+-- "._SX318_SY475_.jpg" -- and those we can swap for the width we want. The
+-- rest end with nothing, and serve one fixed image: appending a marker is
+-- silently ignored (same bytes back), and the "m" folder that would hold a
+-- smaller copy is missing about a third of the time, answering 403. So an
+-- address without markers is used exactly as it is.
+local SIZED_ENDING = "%._S[XY]%d+_[%w_]*%.jpg$"
+
+--- The cover URL to store for a book, or nothing when there is no cover to
+-- fetch: Goodreads answers those with a grey stand-in, and we have our own.
 function Shelf.coverUrl(book)
-    if not book.image then return nil end
-    if book.image:match("%._S[XY]%d+_%.jpg$") then
-        return (book.image:gsub("%._S[XY]%d+_%.jpg$", "._SX" .. COVER_WIDTH .. "_.jpg"))
-    end
-    return (book.image:gsub("(%d+)l/", "%1m/"))
+    if not book.image or book.image:find("/nophoto/", 1, true) then return nil end
+    -- gsub leaves an address without markers untouched, which is what we want.
+    return (book.image:gsub(SIZED_ENDING, "._SX" .. COVER_WIDTH .. "_.jpg"))
 end
 
 -- Downloading ---------------------------------------------------------------
