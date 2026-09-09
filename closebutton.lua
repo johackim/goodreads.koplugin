@@ -11,14 +11,18 @@ is declared -- "set to false for any IconButton that may close its container".
 ]]
 
 local IconButton = require("ui/widget/iconbutton")
+local Size = require("ui/size")
 
 --- An "×" at the right end of a title bar, closing `window` when tapped.
+-- The padding keeps it off the screen edges, where it would look clipped, and
+-- widens the tap area towards the middle of the bar.
 return function(window)
     return IconButton:new{
         icon = "close",
         overlap_align = "right",
         allow_flash = false,
         show_parent = window,
+        padding = Size.padding.large,
         callback = function() window:onClose() end,
     }
 end

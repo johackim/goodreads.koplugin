@@ -72,15 +72,16 @@ end
 -- instead of dropping out to the file browser.
 
 --- The fields GoodreadsBook expects, taken from one of our records.
+-- What we do not know is left out rather than spelled "N/A": the card simply
+-- omits it, the way the Goodreads app does.
 local function detailsOf(book)
-    local unknown = _("N/A")
     return {
         title       = book.title,
-        author      = book.author or unknown,
-        series      = book.series or unknown,
-        rating      = book.rating or unknown,
-        pages       = book.pages or unknown,
-        release     = book.year or unknown,
+        author      = book.author or _("Unknown author"),
+        series      = book.series,
+        rating      = book.rating,
+        pages       = book.pages,
+        release     = book.year,
         cover       = Shelf.coverFile(book),
         -- The detail page renders this as HTML, so keep the paragraphs.
         description = (book.description or _("No description.")):gsub("\n", "<br/>"),
