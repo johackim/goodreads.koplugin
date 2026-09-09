@@ -59,15 +59,50 @@ end
 
 -- Reading the feed ----------------------------------------------------------
 
---- Splits the feed address copied from Goodreads into its parts.
--- Only the user number is required. A public profile serves its feed to
--- anyone, so the key is optional; a private one needs the key that Goodreads
--- puts in the address it gives you.
--- Returns nothing when the address is not a Goodreads feed.
-function Shelf.parseFeedUrl(feed_url)
-    local user_id = feed_url:match("/review/list_rss/(%d+)")
-    if not user_id then return nil end
-    return user_id, feed_url:match("[?&]key=([^&]+)"), feed_url:match("[?&]shelf=([^&]+)")
+local function trim(text)
+    return (text:match("^%s*(.-)%s*$"))
+end
+
+--- Turns a username into the number the feed needs.
+-- goodreads.com/<name> answers 301 towards /user/show/<number>-<name>, so a
+-- HEAD request is enough and never fetches a page.
+local function resolveUsername(name)
+    socketutil:set_timeout()
+    local _, _, headers = http.request{
+        url = "https://www.goodreads.com/" .. name,
+        method = "HEAD",
+        redirect = false,
+    }
+    socketutil:reset_timeout()
+    if type(headers) ~= "table" or type(headers.location) ~= "string" then return nil end
+    return headers.location:match("/user/show/(%d+)")
+end
+
+--- Works out whose shelf to read, from whatever was typed: a user number, a
+-- username, a profile address, or a whole feed address.
+-- Returns the number and, when a feed address carried one, its private key.
+-- Only a username costs a request; every other form is read on the spot.
+function Shelf.findUser(typed)
+    typed = trim(typed or "")
+    if typed == "" then return nil end
+    -- A feed address is the only form that can carry a key, which a private
+    -- shelf needs.
+    local from_feed = typed:match("/review/list_rss/(%d+)")
+    if from_feed then return from_feed, typed:match("[?&]key=([^&]+)") end
+    local from_profile = typed:match("/user/show/(%d+)")
+    if from_profile then return from_profile end
+    if typed:match("^%d+$") then return typed end
+    return resolveUsername(typed)
+end
+
+--- The shelf as the feed wants it. Goodreads spells "everything" as "#ALL#",
+-- which has to be escaped; anything else is a plain shelf name.
+function Shelf.encodeShelf(name)
+    name = trim(name or "")
+    if name == "" or name:lower() == "all" then return "%23ALL%23" end
+    return (name:gsub("[^%w%-_]", function(char)
+        return string.format("%%%02X", string.byte(char))
+    end))
 end
 
 -- `sort` is a Goodreads ordering name, or nil for its default, which lists the
@@ -91,10 +126,6 @@ local function decodeEntities(text)
         return code < 128 and string.char(code) or nil
     end)
     return (text:gsub("&(%a+);", HTML_ENTITIES))
-end
-
-local function trim(text)
-    return (text:match("^%s*(.-)%s*$"))
 end
 
 --- The text of one tag inside a feed item, unwrapped from CDATA if need be.

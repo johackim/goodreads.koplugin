@@ -12,6 +12,7 @@ local DoubleKeyValuePage = require("doublekeyvaluepage")
 local GoodreadsBook = require("goodreadsbook")
 local InfoMessage = require("ui/widget/infomessage")
 local InputDialog = require("ui/widget/inputdialog")
+local MultiInputDialog = require("ui/widget/multiinputdialog")
 local LuaSettings = require("luasettings")
 local NetworkMgr = require("ui/network/manager")
 local Shelf = require("goodreadsshelf")
@@ -56,7 +57,16 @@ local Goodreads = WidgetContainer:extend{
 
 function Goodreads:init()
     self.settings = LuaSettings:open(DataStorage:getSettingsDir() .. "/goodreadssettings.lua")
-    self.feed_url = self.settings:readSetting("feed_url") or ""
+    -- Older versions stored the whole feed address. findUser still reads one,
+    -- so carrying it over as-is keeps those installs working, key included --
+    -- and the shelf it named has to come across too, or a sync set to one
+    -- shelf would quietly widen to the whole library.
+    local older_address = self.settings:readSetting("feed_url")
+    self.user = self.settings:readSetting("user") or older_address or ""
+    self.shelf = self.settings:readSetting("shelf")
+        or (older_address and older_address:match("[?&]shelf=([^&]+)"))
+        or "All"
+    if self.shelf == "%23ALL%23" then self.shelf = "All" end
     self.sort_order = self.settings:readSetting("sort_order") or SORT_ORDERS[1].id
     self.ui.menu:registerToMainMenu(self)
 end
@@ -185,14 +195,21 @@ end
 --- Reads the whole shelf, then downloads the covers it does not have yet.
 -- Both passes can be stopped by tapping; whatever was fetched is kept.
 function Goodreads:sync()
-    local user_id, key, shelf = Shelf.parseFeedUrl(self.feed_url)
-    if not user_id then
-        UIManager:show(InfoMessage:new{
-            text = _("Set your Goodreads RSS feed address first."),
-        })
+    if self.user == "" then
+        UIManager:show(InfoMessage:new{ text = _("Set your Goodreads account first.") })
         return
     end
     if NetworkMgr:willRerunWhenOnline(function() self:sync() end) then return end
+
+    -- Resolving a username needs the network, so it waits until we have it.
+    local user_id, key = Shelf.findUser(self.user)
+    if not user_id then
+        UIManager:show(InfoMessage:new{
+            text = T(_("Could not find the Goodreads user “%1”."), self.user),
+        })
+        return
+    end
+    local shelf = Shelf.encodeShelf(self.shelf)
 
     Trapper:wrap(function()
         local books, whole_shelf = Shelf.fetchBooks(user_id, key, shelf, function(page, found)
@@ -232,26 +249,34 @@ function Goodreads:sync()
     end)
 end
 
-function Goodreads:editFeedUrl()
+function Goodreads:editAccount()
     local dialog
-    dialog = InputDialog:new{
-        title = _("Goodreads RSS feed address"),
-        input = self.feed_url,
-        description = _([[
-On Goodreads, open My Books and copy the RSS link at the bottom of the page.
-
-A public profile needs nothing more than its number, so you may drop the "key" part of the address. Keep it only if your profile is private -- it is then a private key to your shelves.]]),
+    dialog = MultiInputDialog:new{
+        title = _("Goodreads account"),
+        fields = {
+            {
+                text = self.user,
+                hint = _("Username or user number"),
+            },
+            {
+                text = self.shelf,
+                hint = _("Shelf, or All"),
+            },
+        },
         buttons = {{
             {
                 text = _("Cancel"),
+                id = "close",
                 callback = function() UIManager:close(dialog) end,
             },
             {
                 text = _("Save"),
-                is_enter_default = true,
                 callback = function()
-                    self.feed_url = dialog:getInputText()
-                    self:remember("feed_url", self.feed_url)
+                    local user, shelf = unpack(dialog:getFields())
+                    self.user = user
+                    self.shelf = shelf
+                    self:remember("user", user)
+                    self:remember("shelf", shelf)
                     UIManager:close(dialog)
                 end,
             },
@@ -304,9 +329,12 @@ function Goodreads:addToMainMenu(menu_items)
                 callback = function() self:sync() end,
             },
             {
-                text = _("RSS feed address"),
+                text_func = function()
+                    if self.user == "" then return _("Goodreads account") end
+                    return T(_("Account: %1 / %2"), self.user, self.shelf)
+                end,
                 keep_menu_open = true,
-                callback = function() self:editFeedUrl() end,
+                callback = function() self:editAccount() end,
             },
         },
     }
