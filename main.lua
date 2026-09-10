@@ -247,7 +247,7 @@ function Goodreads:sync(everything)
         end
         -- How many ratings each book has, which the feed never says. This is
         -- what "Most rated" sorts on, and what the card shows.
-        local ranked = Shelf.fetchRatings(uncounted, function(done, total)
+        local ranked, why_not = Shelf.fetchRatings(uncounted, function(done, total)
             return Trapper:info(T(
                 _("Counting ratings…\n\n%1 of %2\n\nTap to stop."), done, total))
         end)
@@ -261,7 +261,8 @@ function Goodreads:sync(everything)
         Trapper:reset()
         local done = T(N_("%1 book on your device.", "%1 books on your device.", #books), #books)
         if not ranked then
-            done = done .. "\n" .. _("Sorting by “Most rated” is unavailable: that pass did not finish.")
+            done = done .. "\n" .. T(
+                _("Sorting by “Most rated” is unavailable: %1."), why_not or _("that pass did not finish"))
         end
         UIManager:show(InfoMessage:new{ text = done })
     end)

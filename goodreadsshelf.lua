@@ -25,7 +25,7 @@ local MAX_FEED_PAGES = 200       -- a stop, should the feed never run short
 local MAX_DESCRIPTION = 1200     -- descriptions are most of the file's weight
 local COVER_WIDTH = 318          -- the widest Goodreads serves, and only ~20kB
 local BOOKS_PER_RATINGS_CALL = 100  -- 200 in one call is refused by their firewall
-local TRIES_PER_PAGE = 3         -- a weak connection drops the odd page
+local TRIES_PER_REQUEST = 3      -- a weak connection drops the odd request
 
 -- Our own files sit next to this one. A plugin installed by hand is not
 -- under the KOReader folder, so a fixed path would not find them.
@@ -235,7 +235,7 @@ local function walkShelf(user_id, key, shelf, sort, report, readPage)
     for page = 1, MAX_FEED_PAGES do
         local url = feedPageUrl(user_id, key, shelf, sort, page)
         local feed_xml
-        for _try = 1, TRIES_PER_PAGE do
+        for _try = 1, TRIES_PER_REQUEST do
             if report(page) == false then return false, "stopped" end
             feed_xml = download(url,
                 socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
@@ -307,7 +307,9 @@ local RATINGS_URL =
 local RATINGS_KEY = "da2-d2fyuybwsbf3poyquvbp2mbiwu"
 
 --- Asks for the ratings counts of one batch of books.
--- Returns a list lining up with `books`, or nothing if the call failed.
+-- Returns a list lining up with `books`, or nil and a short reason. The
+-- reason matters: this endpoint is undocumented, so when it stops answering
+-- the reader should be told what it said rather than just that it failed.
 local function requestRatings(books)
     local asks = {}
     for index, book in ipairs(books) do
@@ -318,7 +320,10 @@ local function requestRatings(books)
     local body = rapidjson.encode({ query = "query{" .. table.concat(asks, " ") .. "}" })
 
     local sink = {}
-    socketutil:set_timeout(socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
+    -- Each call opens a fresh TLS connection, and an e-reader's processor is
+    -- slow at that handshake: too short an allowance ends it with "wantread"
+    -- before it completes. This is the allowance the feed already needs.
+    socketutil:set_timeout(socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
     local code = socket.skip(1, http.request{
         url = RATINGS_URL,
         method = "POST",
@@ -331,11 +336,16 @@ local function requestRatings(books)
         sink = ltn12.sink.table(sink),
     })
     socketutil:reset_timeout()
-    if code ~= 200 then return nil end
+    if code ~= 200 then return nil, tostring(code) end
 
-    local decoded, answer = pcall(rapidjson.decode, table.concat(sink))
-    if not decoded or type(answer) ~= "table" or type(answer.data) ~= "table" then
-        return nil
+    local reply = table.concat(sink)
+    if reply == "" then return nil, "empty answer" end
+    local decoded, answer = pcall(rapidjson.decode, reply)
+    if not decoded or type(answer) ~= "table" then return nil, "unreadable answer" end
+    if type(answer.data) ~= "table" then
+        -- GraphQL puts its complaints in "errors".
+        local complaint = answer.errors and answer.errors[1]
+        return nil, complaint and tostring(complaint.message or complaint.errorType) or "no data"
     end
     local counts, found_any = {}, false
     for index = 1, #books do
@@ -350,13 +360,14 @@ local function requestRatings(books)
     -- A whole batch without a single count means the answer is not what we
     -- expect any more. Better to stop than to quietly order the library on
     -- nothing at all.
-    if not found_any then return nil end
+    if not found_any then return nil, "no counts in answer" end
     return counts
 end
 
 --- Fills in how many ratings each book has.
--- Returns whether the whole library came back; the books are left as they were
--- if not, so a half-answered run cannot order the library on partial figures.
+-- Returns whether the whole library came back, and if not, why. The books are
+-- left as they were unless it did, so a half-answered run cannot order the
+-- library on partial figures.
 function Shelf.fetchRatings(books, report)
     local counted = {}
     local done = 0
@@ -366,8 +377,13 @@ function Shelf.fetchRatings(books, report)
         for index = done + 1, math.min(done + BOOKS_PER_RATINGS_CALL, #books) do
             table.insert(batch, books[index])
         end
-        local counts = requestRatings(batch)
-        if not counts then return false end
+        local counts, why
+        for _try = 1, TRIES_PER_REQUEST do
+            counts, why = requestRatings(batch)
+            if counts then break end
+            if report(done, #books) == false then return false, "stopped" end
+        end
+        if not counts then return false, why end
         for index = 1, #batch do
             counted[done + index] = counts[index]
         end
