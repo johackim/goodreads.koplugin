@@ -57,16 +57,8 @@ local Goodreads = WidgetContainer:extend{
 
 function Goodreads:init()
     self.settings = LuaSettings:open(DataStorage:getSettingsDir() .. "/goodreadssettings.lua")
-    -- Older versions stored the whole feed address. findUser still reads one,
-    -- so carrying it over as-is keeps those installs working, key included --
-    -- and the shelf it named has to come across too, or a sync set to one
-    -- shelf would quietly widen to the whole library.
-    local older_address = self.settings:readSetting("feed_url")
-    self.user = self.settings:readSetting("user") or older_address or ""
-    self.shelf = self.settings:readSetting("shelf")
-        or (older_address and older_address:match("[?&]shelf=([^&]+)"))
-        or "All"
-    if self.shelf == "%23ALL%23" then self.shelf = "All" end
+    self.user = self.settings:readSetting("user") or ""
+    self.shelf = self.settings:readSetting("shelf") or "All"
     self.sort_order = self.settings:readSetting("sort_order") or SORT_ORDERS[1].id
     self.ui.menu:registerToMainMenu(self)
 end
@@ -275,7 +267,10 @@ function Goodreads:editAccount()
         fields = {
             {
                 text = self.user,
-                hint = _("Username or user number"),
+                -- A private shelf is only readable through its own feed
+                -- address, the one place its key is written down, so the
+                -- field has to take a whole address as readily as a name.
+                hint = _("Username, user number or RSS address"),
             },
             {
                 text = self.shelf,
@@ -355,6 +350,7 @@ function Goodreads:addToMainMenu(menu_items)
                     return T(_("Account: %1 / %2"), self.user, self.shelf)
                 end,
                 keep_menu_open = true,
+                help_text = _("Your username is enough for a public shelf. A private one is only readable through its RSS address, which carries the key that unlocks it: open your shelf on goodreads.com and copy the address behind the RSS link at the bottom."),
                 callback = function() self:editAccount() end,
             },
         },
