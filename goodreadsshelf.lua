@@ -67,8 +67,10 @@ end
 --- Turns a username into the number the feed needs.
 -- goodreads.com/<name> answers 301 towards /user/show/<number>-<name>, so a
 -- HEAD request is enough and never fetches a page.
+-- The default allowance is far too short here: no body comes back, but an
+-- e-reader still needs seconds to look up the name and shake hands over TLS.
 local function resolveUsername(name)
-    socketutil:set_timeout()
+    socketutil:set_timeout(socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
     local _, _, headers = http.request{
         url = "https://www.goodreads.com/" .. name,
         method = "HEAD",
@@ -196,9 +198,13 @@ end
 -- slows down the further into a shelf you read -- measured at 0.5s for page 3
 -- but 8s for page 50, on a fast line -- so those get the allowance meant for
 -- file downloads. Too short an allowance simply ends the sync early.
+-- Every caller passes its own allowance: the default one LuaSocket would use
+-- (5s to connect, 15s in all) is too short for an e-reader on Wi-Fi.
 local function download(url, block_timeout, total_timeout)
     local body = {}
-    socketutil:set_timeout(block_timeout, total_timeout)
+    socketutil:set_timeout(
+        block_timeout or socketutil.LARGE_BLOCK_TIMEOUT,
+        total_timeout or socketutil.LARGE_TOTAL_TIMEOUT)
     local code = socket.skip(1, http.request{ url = url, sink = ltn12.sink.table(body) })
     socketutil:reset_timeout()
     return code == 200 and table.concat(body) or nil
@@ -279,7 +285,7 @@ local function requestRatings(books)
     local body = rapidjson.encode({ query = "query{" .. table.concat(asks, " ") .. "}" })
 
     local sink = {}
-    socketutil:set_timeout()
+    socketutil:set_timeout(socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
     local code = socket.skip(1, http.request{
         url = RATINGS_URL,
         method = "POST",
@@ -347,7 +353,8 @@ function Shelf.fetchCovers(books, report)
         if report(index, #books) == false then break end
         if not hasCover(book) then
             local url = Shelf.coverUrl(book)
-            local image = url and download(url)
+            local image = url and download(url,
+                socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
             if image then
                 writeFile(Shelf.coverPath(book), image)
             end

@@ -205,7 +205,10 @@ function Goodreads:sync()
     local user_id, key = Shelf.findUser(self.user)
     if not user_id then
         UIManager:show(InfoMessage:new{
-            text = T(_("Could not find the Goodreads user “%1”."), self.user),
+            -- A username is looked up over the network, so a wrong name and a
+            -- bad connection both land here; say so rather than blame the name.
+            text = T(_("Could not look up the Goodreads user “%1”.\n\nCheck the name and the connection, or enter your user number instead."),
+                self.user),
         })
         return
     end
