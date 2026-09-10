@@ -5,15 +5,19 @@ Goodreads retired its API, so this plugin reads the RSS export of your shelf
 instead. One sync stores every book and its cover locally; everything after
 that -- browsing, searching, opening a book -- reads only what is stored, and
 needs no connection.
+
+This file is the plugin's face: the menu, the dialogs, and turning stored
+books into the strings the two windows show. Reading and storing the shelf
+belongs to goodreadsshelf.lua.
 ]]
 
+local BookListPage = require("booklistpage")
 local DataStorage = require("datastorage")
-local DoubleKeyValuePage = require("doublekeyvaluepage")
 local GoodreadsBook = require("goodreadsbook")
 local InfoMessage = require("ui/widget/infomessage")
 local InputDialog = require("ui/widget/inputdialog")
-local MultiInputDialog = require("ui/widget/multiinputdialog")
 local LuaSettings = require("luasettings")
+local MultiInputDialog = require("ui/widget/multiinputdialog")
 local NetworkMgr = require("ui/network/manager")
 local Shelf = require("goodreadsshelf")
 local Trapper = require("ui/trapper")
@@ -37,7 +41,7 @@ local SORT_ORDERS = {
 
 --- 5756911 reads better as 5,756,911. Both the list and the card show the
 -- count, so it is put in shape once, here, where their data is prepared.
-local function grouped(number)
+local function readableNumber(number)
     local digits = tostring(number)
     return (digits:reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", ""))
 end
@@ -49,6 +53,43 @@ local function sortOrderNamed(name)
         if order.id == name then return order end
     end
     return SORT_ORDERS[1]
+end
+
+--- Some feed entries carry no author at all, and both windows have to name
+-- one, so they name the same thing.
+local function authorOf(book)
+    return book.author or _("Unknown author")
+end
+
+--- Why a pass did not finish, in words to show the reader. Both passes of a
+-- sync answer in the same two words, so both are read here.
+local function reasonText(why)
+    if why == "stopped" then return _("you stopped it") end
+    return why or _("it did not finish")
+end
+
+--- The line under a book's title in the list.
+local function subtitleOf(book)
+    if not book.ratings then return authorOf(book) end
+    return authorOf(book) .. " · " .. T(_("%1 ratings"), readableNumber(book.ratings))
+end
+
+--- The fields GoodreadsBook shows, taken from one of our records.
+-- What we do not know is left out rather than spelled "N/A": the card simply
+-- omits it, the way the Goodreads app does.
+local function detailsOf(book)
+    return {
+        title       = book.title,
+        author      = authorOf(book),
+        series      = book.series,
+        rating      = book.rating,
+        pages       = book.pages,
+        release     = book.year,
+        cover       = Shelf.coverFile(book),
+        ratings     = book.ratings and readableNumber(book.ratings),
+        -- The detail page renders this as HTML, so keep the paragraphs.
+        description = (book.description or _("No description.")):gsub("\n", "<br/>"),
+    }
 end
 
 local Goodreads = WidgetContainer:extend{
@@ -76,52 +117,33 @@ function Goodreads:getBooks()
     return self.books
 end
 
+function Goodreads:tell(text)
+    UIManager:show(InfoMessage:new{ text = text })
+end
+
 -- The menu is left open behind these windows on purpose: they cover it while
 -- they are up, and closing one brings the Goodreads menu back where it was,
 -- instead of dropping out to the file browser.
 
---- The fields GoodreadsBook expects, taken from one of our records.
--- What we do not know is left out rather than spelled "N/A": the card simply
--- omits it, the way the Goodreads app does.
-local function detailsOf(book)
-    return {
-        title       = book.title,
-        author      = book.author or _("Unknown author"),
-        series      = book.series,
-        rating      = book.rating,
-        pages       = book.pages,
-        release     = book.year,
-        cover       = Shelf.coverFile(book),
-        ratings     = book.ratings and grouped(book.ratings),
-        -- The detail page renders this as HTML, so keep the paragraphs.
-        description = (book.description or _("No description.")):gsub("\n", "<br/>"),
-    }
-end
-
 function Goodreads:showBooks(title, books)
     if #books == 0 then
-        UIManager:show(InfoMessage:new{ text = _("No book found.") })
+        self:tell(_("No book found."))
         return
     end
     local rows = {}
     for _unused, book in ipairs(Shelf.sorted(books, self.sort_order)) do
-        local under = book.author or _("Unknown author")
-        if book.ratings then
-            under = under .. " · " .. T(_("%1 ratings"), grouped(book.ratings))
-        end
-        -- Second field is the line shown large, first is the smaller one below.
         table.insert(rows, {
-            under,
-            book.title,
-            book = book,
+            title    = book.title,
+            subtitle = subtitleOf(book),
+            cover    = Shelf.coverFile(book),
             callback = function()
-                UIManager:show(GoodreadsBook:new{ dates = detailsOf(book) })
+                UIManager:show(GoodreadsBook:new{ details = detailsOf(book) })
             end,
         })
     end
-    UIManager:show(DoubleKeyValuePage:new{
+    UIManager:show(BookListPage:new{
         title = T("%1 (%2)", title, #books),
-        kv_pairs = rows,
+        rows = rows,
     })
 end
 
@@ -184,11 +206,11 @@ function Goodreads:search()
     dialog:onShowKeyboard()
 end
 
---- Reads the whole shelf, then downloads the covers it does not have yet.
--- Both passes can be stopped by tapping; whatever was fetched is kept.
+--- Reads the whole shelf, then counts ratings and downloads the covers it
+-- does not have yet. Every pass can be stopped by tapping.
 function Goodreads:sync(everything)
     if self.user == "" then
-        UIManager:show(InfoMessage:new{ text = _("Set your Goodreads account first.") })
+        self:tell(_("Set your Goodreads account first."))
         return
     end
     if NetworkMgr:willRerunWhenOnline(function() self:sync() end) then return end
@@ -196,12 +218,10 @@ function Goodreads:sync(everything)
     -- Resolving a username needs the network, so it waits until we have it.
     local user_id, key = Shelf.findUser(self.user)
     if not user_id then
-        UIManager:show(InfoMessage:new{
-            -- A username is looked up over the network, so a wrong name and a
-            -- bad connection both land here; say so rather than blame the name.
-            text = T(_("Could not look up the Goodreads user “%1”.\n\nCheck the name and the connection, or enter your user number instead."),
-                self.user),
-        })
+        -- A username is looked up over the network, so a wrong name and a
+        -- bad connection both land here; say so rather than blame the name.
+        self:tell(T(_("Could not look up the Goodreads user “%1”.\n\nCheck the name and the connection, or enter your user number instead."),
+            self.user))
         return
     end
     local shelf = Shelf.encodeShelf(self.shelf)
@@ -209,28 +229,27 @@ function Goodreads:sync(everything)
     Trapper:wrap(function()
         -- A re-sync only has to read as far as the books we already hold;
         -- asking for everything rebuilds from scratch instead.
-        local stored = (not everything) and self:getBooks() or {}
-        local known = #stored > 0 and Shelf.idsOf(stored) or nil
-        local books, whole_shelf, why = Shelf.fetchBooks(user_id, key, shelf, function(page, found)
-            return Trapper:info(T(
-                _("Reading your shelf…\n\nPage %1, %2 books so far\n\nTap to stop."), page, found))
-        end, known)
+        local stored = everything and {} or self:getBooks()
+        local read_books, whole_shelf, why = Shelf.fetchBooks(user_id, key, shelf,
+            function(page, found)
+                return Trapper:info(T(
+                    _("Reading your shelf…\n\nPage %1, %2 books so far\n\nTap to stop."), page, found))
+            end, stored)
         -- Keep what is stored unless the whole shelf came through: a sync cut
         -- short, by a lost connection or by tapping stop, must not replace a
         -- full library with a partial one. Which of the two it was decides
         -- what the reader should do about it.
         if not whole_shelf then
             Trapper:reset()
-            UIManager:show(InfoMessage:new{
-                text = why == "stopped"
-                    and T(_("Sync stopped, so your books were left as they were.\n\nIt had read %1 books."),
-                        #books)
-                    or T(_("Could not read your whole shelf, so your books were left as they were.\n\nIt gave up after %1 books. Check the connection and try again."),
-                        #books),
-            })
+            self:tell(why == "stopped"
+                and T(_("Sync stopped, so your books were left as they were.\n\nIt had read %1 books."),
+                    #read_books)
+                or T(_("Could not read your whole shelf, so your books were left as they were.\n\nIt gave up after %1 books. Check the connection and try again."),
+                    #read_books))
             return
         end
-        books = Shelf.merged(books, stored)
+
+        local books = Shelf.merged(read_books, stored)
         -- Only books we have no count for, which after a partial read is just
         -- the new ones; after a full one, all of them.
         local uncounted = {}
@@ -251,12 +270,13 @@ function Goodreads:sync(everything)
                 _("Downloading covers…\n\n%1 of %2\n\nTap to stop."), done, total))
         end)
         Trapper:reset()
+
         local done = T(N_("%1 book on your device.", "%1 books on your device.", #books), #books)
         if not ranked then
             done = done .. "\n" .. T(
-                _("Sorting by “Most rated” is unavailable: %1."), why_not or _("that pass did not finish"))
+                _("Sorting by “Most rated” is unavailable: %1."), reasonText(why_not))
         end
-        UIManager:show(InfoMessage:new{ text = done })
+        self:tell(done)
     end)
 end
 
@@ -333,9 +353,7 @@ function Goodreads:addToMainMenu(menu_items)
                 text = _("Search your books"),
                 separator = true,
                 keep_menu_open = true,
-                callback = function()
-                    self:search()
-                end,
+                callback = function() self:search() end,
             },
             {
                 text = _("Sync from Goodreads"),

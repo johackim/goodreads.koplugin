@@ -20,18 +20,20 @@ local socket = require("socket")
 local socketutil = require("socketutil")
 local util = require("util")
 
-local BOOKS_PER_FEED_PAGE = 100  -- what Goodreads gives us per page
-local MAX_FEED_PAGES = 200       -- a stop, should the feed never run short
-local MAX_DESCRIPTION = 1200     -- descriptions are most of the file's weight
-local COVER_WIDTH = 318          -- the widest Goodreads serves, and only ~20kB
+local BOOKS_PER_FEED_PAGE = 100     -- what Goodreads gives us per page
+local MAX_FEED_PAGES = 200          -- a stop, should the feed never run short
+local MAX_DESCRIPTION = 1200        -- descriptions are most of the file's weight
+local COVER_WIDTH = 318             -- the widest Goodreads serves, and only ~20kB
 local BOOKS_PER_RATINGS_CALL = 100  -- 200 in one call is refused by their firewall
-local TRIES_PER_REQUEST = 3      -- a weak connection drops the odd request
+local TRIES_PER_REQUEST = 3         -- a weak connection drops the odd request
 
 -- Our own files sit next to this one. A plugin installed by hand is not
 -- under the KOReader folder, so a fixed path would not find them.
 local PLUGIN_DIR = debug.getinfo(1, "S").source:match("^@?(.*)/[^/]*$")
 
 local Shelf = {}
+
+-- Where things are kept on the device ---------------------------------------
 
 local function libraryPath()
     return DataStorage:getSettingsDir() .. "/goodreads_library.lua"
@@ -41,20 +43,19 @@ local function coversPath()
     return DataStorage:getDataDir() .. "/cache/goodreads_covers"
 end
 
---- Where this book's cover is kept on the device.
-function Shelf.coverPath(book)
+local function coverPath(book)
     return coversPath() .. "/" .. book.id .. ".jpg"
 end
 
 local function hasCover(book)
-    return lfs.attributes(Shelf.coverPath(book), "mode") == "file"
+    return lfs.attributes(coverPath(book), "mode") == "file"
 end
 
 --- The image to show for a book: the cover we downloaded, or the stand-in
 -- shipped with the plugin when we have none. Both views use this, so a book
 -- without a cover looks the same everywhere.
 function Shelf.coverFile(book)
-    if hasCover(book) then return Shelf.coverPath(book) end
+    if hasCover(book) then return coverPath(book) end
     return PLUGIN_DIR .. "/goodreadsnophoto.png"
 end
 
@@ -108,16 +109,15 @@ function Shelf.encodeShelf(name)
     end))
 end
 
--- `sort` is a Goodreads ordering name, or nil for its default, which lists the
--- books newest-added first. Asking for "date_added" by name is not the same
--- thing: it agrees at the start but drifts apart deeper in the shelf, so when
--- we want the default order we say nothing at all.
-local function feedPageUrl(user_id, key, shelf, sort, page)
+-- We never name an ordering: left alone the feed lists the books newest-added
+-- first, which is the order we want and the one the early stop relies on.
+-- Asking for "date_added" by name is not the same thing -- it agrees at the
+-- start but drifts apart deeper in the shelf.
+local function feedPageUrl(user_id, key, shelf, page)
     return string.format(
-        "https://www.goodreads.com/review/list_rss/%s?shelf=%s&page=%d%s%s",
-        user_id, shelf or "%23ALL%23", page,
-        key and ("&key=" .. key) or "",
-        sort and ("&sort=" .. sort) or "")
+        "https://www.goodreads.com/review/list_rss/%s?shelf=%s&page=%d%s",
+        user_id, shelf, page,
+        key and ("&key=" .. key) or "")
 end
 
 local HTML_ENTITIES = { quot = '"', apos = "'", lt = "<", gt = ">", amp = "&", nbsp = " " }
@@ -150,7 +150,7 @@ end
 
 --- Turns one feed page into book records.
 -- Pure: it only reads the string it is given.
-function Shelf.parsePage(feed_xml)
+local function parsePage(feed_xml)
     local books = {}
     for item in feed_xml:gmatch("<item>(.-)</item>") do
         local full_title = tagText(item, "title")
@@ -174,37 +174,15 @@ function Shelf.parsePage(feed_xml)
     return books
 end
 
--- Some cover addresses end with size markers -- "._SX318_.jpg", sometimes
--- "._SX318_SY475_.jpg" -- and those we can swap for the width we want. The
--- rest end with nothing, and serve one fixed image: appending a marker is
--- silently ignored (same bytes back), and the "m" folder that would hold a
--- smaller copy is missing about a third of the time, answering 403. So an
--- address without markers is used exactly as it is.
-local SIZED_ENDING = "%._S[XY]%d+_[%w_]*%.jpg$"
-
---- The cover URL to store for a book, or nothing when there is no cover to
--- fetch: Goodreads answers those with a grey stand-in, and we have our own.
-function Shelf.coverUrl(book)
-    if not book.image or book.image:find("/nophoto/", 1, true) then return nil end
-    -- gsub leaves an address without markers untouched, which is what we want.
-    return (book.image:gsub(SIZED_ENDING, "._SX" .. COVER_WIDTH .. "_.jpg"))
-end
-
 -- Downloading ---------------------------------------------------------------
 
 --- Fetches one address, returning its body, or nothing if that failed.
--- How long to wait depends on what is coming. A cover is a few tens of
--- kilobytes and arrives at once. A feed page is around 400kB, and Goodreads
--- slows down the further into a shelf you read -- measured at 0.5s for page 3
--- but 8s for page 50, on a fast line -- so those get the allowance meant for
--- file downloads. Too short an allowance simply ends the sync early.
--- Every caller passes its own allowance: the default one LuaSocket would use
--- (5s to connect, 15s in all) is too short for an e-reader on Wi-Fi.
+-- How long to wait depends on what is coming, so every caller says: the
+-- default LuaSocket allows (5s to connect, 15s in all) is too short for an
+-- e-reader on Wi-Fi, and too short an allowance simply ends the sync early.
 local function download(url, block_timeout, total_timeout)
     local body = {}
-    socketutil:set_timeout(
-        block_timeout or socketutil.LARGE_BLOCK_TIMEOUT,
-        total_timeout or socketutil.LARGE_TOTAL_TIMEOUT)
+    socketutil:set_timeout(block_timeout, total_timeout)
     local code = socket.skip(1, http.request{ url = url, sink = ltn12.sink.table(body) })
     socketutil:reset_timeout()
     return code == 200 and table.concat(body) or nil
@@ -218,64 +196,8 @@ local function writeFile(path, content)
     return true
 end
 
--- Both downloads below call `report` as they go and stop early if it returns
--- false. The feed cannot say how many pages it has, so it reports the page it
--- is on and the books found so far; covers report a plain count out of a total.
-
---- Walks the shelf one page at a time, handing each page's XML to `readPage`,
--- which returns how many books it found there.
---
--- Returns true once the whole shelf is read, or false and why it stopped:
--- "stopped" when the reader asked, "failed" when a page would not come even
--- after retrying. Saying which matters -- one is a choice, the other a fault.
---
--- A page that fails to arrive looks exactly like the short final page, so
--- without that answer a single timeout would quietly pass for the end.
-local function walkShelf(user_id, key, shelf, sort, report, readPage)
-    for page = 1, MAX_FEED_PAGES do
-        local url = feedPageUrl(user_id, key, shelf, sort, page)
-        local feed_xml
-        for _try = 1, TRIES_PER_REQUEST do
-            if report(page) == false then return false, "stopped" end
-            feed_xml = download(url,
-                socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
-            if feed_xml then break end
-        end
-        if not feed_xml then return false, "failed" end
-        -- A short page means we have reached the end of the shelf.
-        if readPage(feed_xml) < BOOKS_PER_FEED_PAGE then return true end
-    end
-    return true
-end
-
---- Reads the shelf, newest addition first.
---
--- Given `known_ids`, it stops at the first page holding nothing new: the feed
--- is ordered by when each book was added, so everything past such a page is
--- older still and already stored. That turns a re-sync from fifty pages into
--- one. Pass nothing to read the whole shelf.
---
--- Returns the books read and whether it got as far as it meant to.
-function Shelf.fetchBooks(user_id, key, shelf, report, known_ids)
-    local books = {}
-    local whole_shelf, why = walkShelf(user_id, key, shelf, nil,
-        function(page) return report(page, #books) end,
-        function(feed_xml)
-            local page_books = Shelf.parsePage(feed_xml)
-            local fresh = 0
-            for _unused, book in ipairs(page_books) do
-                table.insert(books, book)
-                if not (known_ids and known_ids[book.id]) then fresh = fresh + 1 end
-            end
-            -- Nothing new here: report a short page, which ends the walk.
-            if known_ids and fresh == 0 then return 0 end
-            return #page_books
-        end)
-    return books, whole_shelf, why
-end
-
---- The ids of a list of books, for handing back to fetchBooks.
-function Shelf.idsOf(books)
+--- The ids of a list of books, to look one up by.
+local function idsOf(books)
     local ids = {}
     for _unused, book in ipairs(books) do
         ids[book.id] = true
@@ -283,10 +205,56 @@ function Shelf.idsOf(books)
     return ids
 end
 
+-- The three passes below all call `report` as they go and stop early if it
+-- returns false, which is how a tap on the screen stops a sync.
+
+--- Reads the shelf, newest addition first.
+--
+-- It stops at the first page holding nothing `stored_books` does not already
+-- have: the feed is ordered by when each book was added, so everything past
+-- such a page is older still and already on the device. That turns a re-sync
+-- from fifty pages into one. Pass an empty list to read the whole shelf.
+--
+-- A feed page is around 400kB, and Goodreads slows down the further into a
+-- shelf you read -- measured at 0.5s for page 3 but 8s for page 50, on a fast
+-- line -- so pages get the allowance meant for file downloads, and a page
+-- that does not come is asked for again: a failed page looks exactly like the
+-- short final page, so without retrying a single timeout would quietly pass
+-- for the end of the shelf.
+--
+-- Returns the books read, whether the whole shelf came through, and when it
+-- did not, why: "stopped" when the reader asked, "failed" when a page would
+-- not come. Saying which matters -- one is a choice, the other a fault.
+function Shelf.fetchBooks(user_id, key, shelf, report, stored_books)
+    local known_ids = idsOf(stored_books)
+    local books = {}
+    for page = 1, MAX_FEED_PAGES do
+        local feed_xml
+        for _try = 1, TRIES_PER_REQUEST do
+            if report(page, #books) == false then return books, false, "stopped" end
+            feed_xml = download(feedPageUrl(user_id, key, shelf, page),
+                socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
+            if feed_xml then break end
+        end
+        if not feed_xml then return books, false, "failed" end
+
+        local page_books = parsePage(feed_xml)
+        local fresh = 0
+        for _unused, book in ipairs(page_books) do
+            table.insert(books, book)
+            if not known_ids[book.id] then fresh = fresh + 1 end
+        end
+        -- A short page is the end of the shelf; a page with nothing new on it
+        -- means the rest of the shelf is older still, and already stored.
+        if #page_books < BOOKS_PER_FEED_PAGE or fresh == 0 then return books, true end
+    end
+    return books, true
+end
+
 --- The freshly read books, followed by the stored ones they do not replace.
 -- Both lists are newest-first, so the result stays in that order.
 function Shelf.merged(fresh, stored)
-    local seen = Shelf.idsOf(fresh)
+    local seen = idsOf(fresh)
     local all = {}
     for _unused, book in ipairs(fresh) do
         table.insert(all, book)
@@ -365,14 +333,14 @@ local function requestRatings(books)
 end
 
 --- Fills in how many ratings each book has.
--- Returns whether the whole library came back, and if not, why. The books are
--- left as they were unless it did, so a half-answered run cannot order the
--- library on partial figures.
+-- Returns whether the whole library came back, and when it did not, why, in
+-- the same words fetchBooks uses. The books are left as they were unless it
+-- did, so a half-answered run cannot order the library on partial figures.
 function Shelf.fetchRatings(books, report)
     local counted = {}
     local done = 0
     while done < #books do
-        if report(done, #books) == false then return false end
+        if report(done, #books) == false then return false, "stopped" end
         local batch = {}
         for index = done + 1, math.min(done + BOOKS_PER_RATINGS_CALL, #books) do
             table.insert(batch, books[index])
@@ -395,17 +363,33 @@ function Shelf.fetchRatings(books, report)
     return true
 end
 
+-- Some cover addresses end with size markers -- "._SX318_.jpg", sometimes
+-- "._SX318_SY475_.jpg" -- and those we can swap for the width we want. The
+-- rest end with nothing, and serve one fixed image: appending a marker is
+-- silently ignored (same bytes back), and the "m" folder that would hold a
+-- smaller copy is missing about a third of the time, answering 403. So an
+-- address without markers is used exactly as it is.
+local SIZED_ENDING = "%._S[XY]%d+_[%w_]*%.jpg$"
+
+--- The cover address to fetch for a book, or nothing when there is no cover:
+-- Goodreads answers those with a grey stand-in, and we have our own.
+local function coverUrl(book)
+    if not book.image or book.image:find("/nophoto/", 1, true) then return nil end
+    -- gsub leaves an address without markers untouched, which is what we want.
+    return (book.image:gsub(SIZED_ENDING, "._SX" .. COVER_WIDTH .. "_.jpg"))
+end
+
 --- Downloads the covers that are not on the device yet.
 function Shelf.fetchCovers(books, report)
     util.makePath(coversPath())
     for index, book in ipairs(books) do
         if report(index, #books) == false then break end
         if not hasCover(book) then
-            local url = Shelf.coverUrl(book)
+            local url = coverUrl(book)
             local image = url and download(url,
                 socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
             if image then
-                writeFile(Shelf.coverPath(book), image)
+                writeFile(coverPath(book), image)
             end
         end
     end
@@ -437,8 +421,8 @@ end
 --- Every shelf name with how many books it holds, fullest first.
 function Shelf.shelves(books)
     local counts = {}
-    for _, book in ipairs(books) do
-        for _, shelf in ipairs(shelvesOf(book)) do
+    for _unused, book in ipairs(books) do
+        for _unused2, shelf in ipairs(shelvesOf(book)) do
             counts[shelf] = (counts[shelf] or 0) + 1
         end
     end
@@ -456,8 +440,8 @@ end
 --- The books filed under one shelf.
 function Shelf.onShelf(books, shelf)
     local found = {}
-    for _, book in ipairs(books) do
-        for _, name in ipairs(shelvesOf(book)) do
+    for _unused, book in ipairs(books) do
+        for _unused2, name in ipairs(shelvesOf(book)) do
             if name == shelf then
                 table.insert(found, book)
                 break
@@ -494,7 +478,7 @@ end
 function Shelf.matching(books, text)
     local wanted = text:lower()
     local found = {}
-    for _, book in ipairs(books) do
+    for _unused, book in ipairs(books) do
         local haystack = ((book.title or "") .. " " .. (book.author or "")):lower()
         if haystack:find(wanted, 1, true) then
             table.insert(found, book)
