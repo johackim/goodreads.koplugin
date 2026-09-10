@@ -78,6 +78,6 @@ Please support me with a one-time or a monthly donation and help me continue my 
 
 ## 📜 License
 
-This project is licensed under the GNU AGPL v3.0, like KOReader itself.
+This project is licensed under the GNU AGPL v3.0, like KOReader itself — see the [LICENSE.txt](https://raw.githubusercontent.com/johackim/goodreads.koplugin/master/LICENSE.txt) file for details.
 
 **Free Software, Hell Yeah!**
