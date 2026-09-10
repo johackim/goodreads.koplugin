@@ -194,7 +194,7 @@ end
 
 --- Reads the whole shelf, then downloads the covers it does not have yet.
 -- Both passes can be stopped by tapping; whatever was fetched is kept.
-function Goodreads:sync()
+function Goodreads:sync(everything)
     if self.user == "" then
         UIManager:show(InfoMessage:new{ text = _("Set your Goodreads account first.") })
         return
@@ -215,10 +215,14 @@ function Goodreads:sync()
     local shelf = Shelf.encodeShelf(self.shelf)
 
     Trapper:wrap(function()
+        -- A re-sync only has to read as far as the books we already hold;
+        -- asking for everything rebuilds from scratch instead.
+        local stored = (not everything) and self:getBooks() or {}
+        local known = #stored > 0 and Shelf.idsOf(stored) or nil
         local books, whole_shelf, why = Shelf.fetchBooks(user_id, key, shelf, function(page, found)
             return Trapper:info(T(
                 _("Reading your shelf…\n\nPage %1, %2 books so far\n\nTap to stop."), page, found))
-        end)
+        end, known)
         -- Keep what is stored unless the whole shelf came through: a sync cut
         -- short, by a lost connection or by tapping stop, must not replace a
         -- full library with a partial one. Which of the two it was decides
@@ -234,9 +238,16 @@ function Goodreads:sync()
             })
             return
         end
+        books = Shelf.merged(books, stored)
+        -- Only books we have no count for, which after a partial read is just
+        -- the new ones; after a full one, all of them.
+        local uncounted = {}
+        for _unused, book in ipairs(books) do
+            if not book.ratings then table.insert(uncounted, book) end
+        end
         -- How many ratings each book has, which the feed never says. This is
         -- what "Most rated" sorts on, and what the card shows.
-        local ranked = Shelf.fetchRatings(books, function(done, total)
+        local ranked = Shelf.fetchRatings(uncounted, function(done, total)
             return Trapper:info(T(
                 _("Counting ratings…\n\n%1 of %2\n\nTap to stop."), done, total))
         end)
@@ -333,7 +344,9 @@ function Goodreads:addToMainMenu(menu_items)
             {
                 text = _("Sync from Goodreads"),
                 keep_menu_open = true,
+                help_text = _("Reads only what you added since last time. Hold to read the whole shelf again, which also picks up books you removed or moved between shelves."),
                 callback = function() self:sync() end,
+                hold_callback = function() self:sync(true) end,
             },
             {
                 text_func = function()

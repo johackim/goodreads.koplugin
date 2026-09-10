@@ -248,20 +248,53 @@ local function walkShelf(user_id, key, shelf, sort, report, readPage)
     return true
 end
 
---- Reads every book on the shelf.
--- Returns the books and whether the whole shelf was read.
-function Shelf.fetchBooks(user_id, key, shelf, report)
+--- Reads the shelf, newest addition first.
+--
+-- Given `known_ids`, it stops at the first page holding nothing new: the feed
+-- is ordered by when each book was added, so everything past such a page is
+-- older still and already stored. That turns a re-sync from fifty pages into
+-- one. Pass nothing to read the whole shelf.
+--
+-- Returns the books read and whether it got as far as it meant to.
+function Shelf.fetchBooks(user_id, key, shelf, report, known_ids)
     local books = {}
     local whole_shelf, why = walkShelf(user_id, key, shelf, nil,
         function(page) return report(page, #books) end,
         function(feed_xml)
             local page_books = Shelf.parsePage(feed_xml)
+            local fresh = 0
             for _unused, book in ipairs(page_books) do
                 table.insert(books, book)
+                if not (known_ids and known_ids[book.id]) then fresh = fresh + 1 end
             end
+            -- Nothing new here: report a short page, which ends the walk.
+            if known_ids and fresh == 0 then return 0 end
             return #page_books
         end)
     return books, whole_shelf, why
+end
+
+--- The ids of a list of books, for handing back to fetchBooks.
+function Shelf.idsOf(books)
+    local ids = {}
+    for _unused, book in ipairs(books) do
+        ids[book.id] = true
+    end
+    return ids
+end
+
+--- The freshly read books, followed by the stored ones they do not replace.
+-- Both lists are newest-first, so the result stays in that order.
+function Shelf.merged(fresh, stored)
+    local seen = Shelf.idsOf(fresh)
+    local all = {}
+    for _unused, book in ipairs(fresh) do
+        table.insert(all, book)
+    end
+    for _unused, book in ipairs(stored) do
+        if not seen[book.id] then table.insert(all, book) end
+    end
+    return all
 end
 
 -- Goodreads' own web app reads book statistics from this GraphQL endpoint,
