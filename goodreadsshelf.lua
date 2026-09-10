@@ -315,20 +315,23 @@ local function requestRatings(books)
         local complaint = answer.errors and answer.errors[1]
         return nil, complaint and tostring(complaint.message or complaint.errorType) or "no data"
     end
-    local counts, found_any = {}, false
+    local counts = {}
     for index = 1, #books do
-        -- A book Goodreads no longer knows about answers with null.
         local found = answer.data["b" .. index]
         if type(found) == "table" and type(found.work) == "table"
                 and type(found.work.stats) == "table" then
             counts[index] = found.work.stats.ratingsCount
-            found_any = true
         end
     end
-    -- A whole batch without a single count means the answer is not what we
-    -- expect any more. Better to stop than to quietly order the library on
-    -- nothing at all.
-    if not found_any then return nil, "no counts in answer" end
+    -- A book Goodreads has dropped or merged answers with null, and says so
+    -- in "errors" beside the data: that is a good answer about a bad book,
+    -- and costs that book its count and nothing more. Those books gather at
+    -- the end of the list, having never been counted, so a whole batch of
+    -- them is normal and must not read as a failure.
+    -- A batch that answers nothing with nothing to explain it is another
+    -- matter: the endpoint is undocumented, and an answer we no longer
+    -- understand is better stopped on than quietly ordered by.
+    if next(counts) == nil and not answer.errors then return nil, "no counts in answer" end
     return counts
 end
 
