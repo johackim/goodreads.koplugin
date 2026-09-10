@@ -25,6 +25,7 @@ local MAX_FEED_PAGES = 200       -- a stop, should the feed never run short
 local MAX_DESCRIPTION = 1200     -- descriptions are most of the file's weight
 local COVER_WIDTH = 318          -- the widest Goodreads serves, and only ~20kB
 local BOOKS_PER_RATINGS_CALL = 100  -- 200 in one call is refused by their firewall
+local TRIES_PER_PAGE = 3         -- a weak connection drops the odd page
 
 -- Our own files sit next to this one. A plugin installed by hand is not
 -- under the KOReader folder, so a fixed path would not find them.
@@ -217,15 +218,24 @@ end
 
 --- Walks the shelf one page at a time, handing each page's XML to `readPage`,
 -- which returns how many books it found there.
--- Returns whether the whole shelf was read. A page that fails to arrive looks
--- exactly like the short final page, so without that answer a single timeout
--- would quietly pass for the end of the shelf.
+--
+-- Returns true once the whole shelf is read, or false and why it stopped:
+-- "stopped" when the reader asked, "failed" when a page would not come even
+-- after retrying. Saying which matters -- one is a choice, the other a fault.
+--
+-- A page that fails to arrive looks exactly like the short final page, so
+-- without that answer a single timeout would quietly pass for the end.
 local function walkShelf(user_id, key, shelf, sort, report, readPage)
     for page = 1, MAX_FEED_PAGES do
-        if report(page) == false then return false end
-        local feed_xml = download(feedPageUrl(user_id, key, shelf, sort, page),
-            socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
-        if not feed_xml then return false end
+        local url = feedPageUrl(user_id, key, shelf, sort, page)
+        local feed_xml
+        for _try = 1, TRIES_PER_PAGE do
+            if report(page) == false then return false, "stopped" end
+            feed_xml = download(url,
+                socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
+            if feed_xml then break end
+        end
+        if not feed_xml then return false, "failed" end
         -- A short page means we have reached the end of the shelf.
         if readPage(feed_xml) < BOOKS_PER_FEED_PAGE then return true end
     end
@@ -236,7 +246,7 @@ end
 -- Returns the books and whether the whole shelf was read.
 function Shelf.fetchBooks(user_id, key, shelf, report)
     local books = {}
-    local whole_shelf = walkShelf(user_id, key, shelf, nil,
+    local whole_shelf, why = walkShelf(user_id, key, shelf, nil,
         function(page) return report(page, #books) end,
         function(feed_xml)
             local page_books = Shelf.parsePage(feed_xml)
@@ -245,7 +255,7 @@ function Shelf.fetchBooks(user_id, key, shelf, report)
             end
             return #page_books
         end)
-    return books, whole_shelf
+    return books, whole_shelf, why
 end
 
 -- Goodreads' own web app reads book statistics from this GraphQL endpoint,

@@ -212,18 +212,22 @@ function Goodreads:sync()
     local shelf = Shelf.encodeShelf(self.shelf)
 
     Trapper:wrap(function()
-        local books, whole_shelf = Shelf.fetchBooks(user_id, key, shelf, function(page, found)
+        local books, whole_shelf, why = Shelf.fetchBooks(user_id, key, shelf, function(page, found)
             return Trapper:info(T(
                 _("Reading your shelf…\n\nPage %1, %2 books so far\n\nTap to stop."), page, found))
         end)
         -- Keep what is stored unless the whole shelf came through: a sync cut
         -- short, by a lost connection or by tapping stop, must not replace a
-        -- full library with a partial one.
+        -- full library with a partial one. Which of the two it was decides
+        -- what the reader should do about it.
         if not whole_shelf then
             Trapper:reset()
             UIManager:show(InfoMessage:new{
-                text = T(_("Sync did not finish, so your books were left as they were.\n\nIt stopped after %1 books."),
-                    #books),
+                text = why == "stopped"
+                    and T(_("Sync stopped, so your books were left as they were.\n\nIt had read %1 books."),
+                        #books)
+                    or T(_("Could not read your whole shelf, so your books were left as they were.\n\nIt gave up after %1 books. Check the connection and try again."),
+                        #books),
             })
             return
         end
